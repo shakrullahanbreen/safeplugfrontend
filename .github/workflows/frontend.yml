@@ -6,10 +6,21 @@ on:
       - main
   workflow_dispatch:
 
+# Security: Limit permissions to minimum required
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: 🧩 Build & Deploy Next.js SSR
     runs-on: ubuntu-latest
+    # Security: Set timeout to prevent hanging workflows
+    timeout-minutes: 15
+    
+    # Security: Define environment for deployment
+    environment:
+      name: production
+      url: https://safeplug.com
 
     steps:
       - name: 🧾 Checkout repository
@@ -21,28 +32,35 @@ jobs:
           node-version: '18.x'
           cache: 'npm'
 
-      - name: ⚙️ Set up SSH
+      - name: 🔐 Set up SSH with Host Key Verification
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
+      - name: 🔑 Add VPS Host Key (Security:Prevent MITM attacks)
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_HOST_KEY }}" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
       - name: 🧠 Test SSH connection
         run: |
           echo "🔗 Testing SSH connection..."
-          ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "echo ✅ SSH connection successful!"
+          ssh -o BatchMode=yes ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "echo ✅ SSH connection successful!"
 
       - name: 📝 Create .env file for build
         run: |
           echo "📝 Creating .env file from GitHub Secrets..."
-          cat > .env << EOF
-          ${{ secrets.ENV_FILE }}
-          EOF
+          # Security: Write directly to file without echoing to logs
+          printenv ENV_FILE_CONTENT > .env
           echo "✅ .env file created"
+        env:
+          ENV_FILE_CONTENT: ${{ secrets.ENV_FILE }}
 
       - name: 🏗️ Build Next.js app (SSR)
         run: |
           echo "🏗️ Installing dependencies..."
-          npm ci
+          npm ci --ignore-scripts=false --audit=false
           echo "⚙️ Building Next.js app..."
           npm run build
           echo "✅ Build completed successfully!"
@@ -51,21 +69,28 @@ jobs:
         run: |
           echo "📦 Uploading project files to VPS via rsync..."
           rsync -az --delete \
-            -e "ssh -o StrictHostKeyChecking=no" \
+            -e "ssh -o BatchMode=yes" \
             --exclude='.git' \
             --exclude='.github' \
             --exclude='node_modules' \
             --exclude='.next/cache' \
+            --exclude='.env.local' \
+            --exclude='.env.development' \
             ./ \
             ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/root/safeplug/safeplugfrontend/
-          
-          echo "📝 Creating .env file on VPS..."
-          echo "${{ secrets.ENV_FILE }}" | ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "cd /root/safeplug/safeplugfrontend && cat > .env"
+
+      - name: 📝 Securely create .env file on VPS
+        run: |
+          # Security: Use heredoc with proper quoting to prevent injection
+          ssh -o BatchMode=yes ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} 'cat > /root/safeplug/safeplugfrontend/.env && chmod 600 /root/safeplug/safeplugfrontend/.env' << 'ENVEOF'
+          ${{ secrets.ENV_FILE }}
+          ENVEOF
+          echo "✅ .env file created on VPS with secure permissions"
 
       - name: 🚀 Deploy & Restart PM2 Service
         run: |
           echo "🚀 Deploying on VPS..."
-          ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
+          ssh -o BatchMode=yes ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
             set -e
             cd /root/safeplug/safeplugfrontend
 
@@ -77,8 +102,9 @@ jobs:
             echo "📂 Copying static folder to standalone..."
             cp -r /root/safeplug/safeplugfrontend/.next/static /root/safeplug/safeplugfrontend/.next/standalone/.next/ || true
             
-            echo "📝 Copying .env to standalone..."
+            echo "📝 Copying .env to standalone with secure permissions..."
             cp /root/safeplug/safeplugfrontend/.env /root/safeplug/safeplugfrontend/.next/standalone/ || true
+            chmod 600 /root/safeplug/safeplugfrontend/.next/standalone/.env || true
 
             echo "🧹 Cleaning old PM2 process..."
             pm2 stop safeplug-frontend || true
@@ -86,7 +112,7 @@ jobs:
 
             echo "⚙️ Starting Next.js standalone server on port 3001..."
             cd /root/safeplug/safeplugfrontend/.next/standalone
-            PORT=3001 pm2 start server.js --name "safeplug-frontend"
+            PORT=3001 pm2 start server.js --name "safeplug-frontend" --update-env
 
             echo "💾 Saving PM2 state..."
             pm2 save
@@ -97,12 +123,10 @@ jobs:
       - name: ✅ Verify Deployment
         run: |
           echo "🔍 Verifying deployment..."
-          ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
+          ssh -o BatchMode=yes ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} << 'EOF'
             echo "📊 PM2 Status:"
             pm2 list | grep safeplug || echo "⚠️ safeplug-frontend not running"
             echo ""
-            echo "🧾 Last 10 log lines:"
-            pm2 logs safeplug-frontend --lines 10 --nostream || echo "⚠️ No logs yet"
+            echo "🔍 Health check:"
+            curl -sf http://localhost:3001 > /dev/null && echo "✅ Frontend responding" || echo "⚠️ Frontend not responding"
           EOF
-
-          
