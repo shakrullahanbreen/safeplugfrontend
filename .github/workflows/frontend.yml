@@ -72,7 +72,7 @@ jobs:
             -e "ssh -o BatchMode=yes" \
             --exclude='.git' \
             --exclude='.github' \
-            --exclude='node_modules' \
+            --exclude='/node_modules' \
             --exclude='.next/cache' \
             --exclude='.env.local' \
             --exclude='.env.development' \
